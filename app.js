@@ -212,7 +212,7 @@ function setup() {
   if (activeCategory && !categories.includes(activeCategory)) activeCategory = '';
   $('#itemCount').textContent = items.length;
   $('#categoryCount').textContent = categories.length;
-  $('#categories').innerHTML = `<button class="chip${activeCategory ? '' : ' active'}" data-cat="" title="全部器材"><span class="category-icon" aria-hidden="true">▦</span><span>全部</span></button>` + categories.map(category => {
+  $('#categories').innerHTML = `<button class="chip${activeCategory ? '' : ' active'}" data-cat="" title="全部器材"><span class="category-icon category-all-icon" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span><span>全部</span></button>` + categories.map(category => {
     const sample = items.find(item => item.category === category);
     const visual = sample ? categoryPreviewMarkup_(sample) : `<span class="category-icon" aria-hidden="true">${categoryIcon_(category)}</span>`;
     return `<button class="chip${category === activeCategory ? ' active' : ''}" data-cat="${esc(category)}" title="${esc(categoryName(category))}">${visual}<span>${esc(categoryName(category))}</span></button>`;
