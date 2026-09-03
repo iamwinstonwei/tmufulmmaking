@@ -377,6 +377,7 @@ function openCheckout() {
     <strong>${esc(displayItemName_(item))} × ${item.quantity}</strong><span>${esc(item.code)}｜每一件器材各拍一張領用照片</span>
     ${photoPickers_(item, 'checkout')}
   </div>`).join('');
+  clearSignature_('checkout');
   $('#checkoutDialog').showModal();
   keepModalAtTop_('checkoutDialog');
   resetTurnstile_('checkoutSecurity');
@@ -418,6 +419,99 @@ function photoPickers_(item, stage) {
   return Array.from({ length: Number(item.quantity) }, (_, index) => `<label class="photo-picker"><span class="photo-picker-label">${description}照片 ${index + 1}／${item.quantity}（必填）</span><input type="file" accept="image/*" required ${attribute}="${esc(item.code)}"></label>`).join('');
 }
 
+const signaturePads_ = new Map();
+
+function signaturePad_(stage) {
+  if (signaturePads_.has(stage)) return signaturePads_.get(stage);
+  const canvas = $(`#${stage}Signature`);
+  const block = $(`#${stage}SignatureBlock`);
+  const status = $(`#${stage}SignatureStatus`);
+  const context = canvas.getContext('2d', { alpha: true });
+  let drawing = false;
+  let signed = false;
+  let pointerId = null;
+
+  context.lineCap = 'round';
+  context.lineJoin = 'round';
+  context.strokeStyle = '#17243b';
+  context.lineWidth = 6;
+
+  const point = event => {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left) * canvas.width / Math.max(rect.width, 1),
+      y: (event.clientY - rect.top) * canvas.height / Math.max(rect.height, 1)
+    };
+  };
+  const updateState = () => {
+    block.classList.toggle('is-signed', signed);
+    block.classList.remove('has-error');
+    status.textContent = signed ? '已完成簽名。' : '請在上方以手指或滑鼠簽名。';
+  };
+  const begin = event => {
+    if (event.button !== undefined && event.button !== 0) return;
+    event.preventDefault();
+    const current = point(event);
+    drawing = true;
+    signed = true;
+    pointerId = event.pointerId;
+    if (canvas.setPointerCapture && pointerId !== undefined) canvas.setPointerCapture(pointerId);
+    context.beginPath();
+    context.moveTo(current.x, current.y);
+    context.lineTo(current.x + 0.01, current.y + 0.01);
+    context.stroke();
+    updateState();
+  };
+  const move = event => {
+    if (!drawing || (pointerId !== null && event.pointerId !== pointerId)) return;
+    event.preventDefault();
+    const current = point(event);
+    context.lineTo(current.x, current.y);
+    context.stroke();
+  };
+  const end = event => {
+    if (!drawing || (pointerId !== null && event.pointerId !== pointerId)) return;
+    drawing = false;
+    if (canvas.releasePointerCapture && pointerId !== null && canvas.hasPointerCapture?.(pointerId)) canvas.releasePointerCapture(pointerId);
+    pointerId = null;
+  };
+  const clear = () => {
+    drawing = false;
+    signed = false;
+    pointerId = null;
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    updateState();
+  };
+  const dataUrl = () => {
+    if (!signed) {
+      block.classList.add('has-error');
+      status.textContent = '電子簽名為必填，請先完成簽名。';
+      throw new Error('請先完成電子簽名。');
+    }
+    const output = document.createElement('canvas');
+    output.width = canvas.width;
+    output.height = canvas.height;
+    const outputContext = output.getContext('2d');
+    outputContext.fillStyle = '#ffffff';
+    outputContext.fillRect(0, 0, output.width, output.height);
+    outputContext.drawImage(canvas, 0, 0);
+    return output.toDataURL('image/png');
+  };
+
+  canvas.addEventListener('pointerdown', begin);
+  canvas.addEventListener('pointermove', move);
+  canvas.addEventListener('pointerup', end);
+  canvas.addEventListener('pointercancel', end);
+  canvas.addEventListener('contextmenu', event => event.preventDefault());
+  const api = { clear, dataUrl, isSigned: () => signed };
+  signaturePads_.set(stage, api);
+  updateState();
+  return api;
+}
+
+function clearSignature_(stage) { signaturePad_(stage).clear(); }
+function signatureDataUrl_(stage) { return signaturePad_(stage).dataUrl(); }
+
 function localDateValue(date) {
   const offset = date.getTimezoneOffset() * 60000;
   return new Date(date.getTime() - offset).toISOString().slice(0, 10);
@@ -430,6 +524,8 @@ function openReturn(requestId = '', adminKey = '') {
   const cleanAdminKey = typeof adminKey === 'string' ? adminKey : '';
   form.reset();
   $('#returnItems').innerHTML = '';
+  $('#returnSignatureBlock').hidden = true;
+  clearSignature_('return');
   $('#returnSubmit').hidden = true;
   $('#returnProgress').hidden = true;
   form.elements.requestId.value = cleanRequestId;
@@ -594,6 +690,25 @@ async function secureUploadPhotos_(uploadToken, stage, items) {
   }
 }
 
+async function secureUploadSignature_(uploadToken, stage, signatureDataUrl) {
+  const signature = dataUrlBlob_(signatureDataUrl);
+  if (signature.type !== 'image/png') throw new Error('電子簽名格式不正確，請清除後重新簽名。');
+  const progress = stage === 'checkout' ? $('#checkoutProgress span') : $('#returnProgress span');
+  if (progress) progress.textContent = '正在安全上傳電子簽名，請勿關閉此頁面。';
+  const response = await fetch(secureApiUrl_('/api/signature'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'image/png',
+      'X-Upload-Ticket': uploadToken,
+      'X-Signature-Stage': stage
+    },
+    body: signature
+  });
+  let result;
+  try { result = await response.json(); } catch (_) { throw new Error('簽名上傳服務回應格式錯誤。'); }
+  if (!response.ok || !result.ok) throw new Error(result.message || '電子簽名上傳失敗。');
+}
+
 async function secureRequest_(data) {
   const turnstileToken = await turnstileToken_('checkoutSecurity', 'loan-request');
   const started = await secureJson_('/api/loan/start', {
@@ -603,6 +718,7 @@ async function secureRequest_(data) {
     turnstileToken
   });
   await secureUploadPhotos_(started.uploadToken, 'checkout', data.items);
+  await secureUploadSignature_(started.uploadToken, 'checkout', data.signature);
   return secureJson_('/api/loan/finalize', { uploadToken: started.uploadToken });
 }
 
@@ -614,6 +730,7 @@ async function secureReturn_(data) {
     ...(isAdmin ? {} : { turnstileToken: await turnstileToken_('returnSecurity', 'equipment-return') })
   }, data.adminKey);
   await secureUploadPhotos_(started.uploadToken, 'return', data.items);
+  await secureUploadSignature_(started.uploadToken, 'return', data.signature);
   return secureJson_('/api/return/finalize', { uploadToken: started.uploadToken }, data.adminKey);
 }
 
@@ -650,6 +767,8 @@ async function lookupReturn() {
     const outstanding = result.items.filter(item => !item.returned);
     if (!outstanding.length) return toast('這筆申請沒有待歸還的器材。');
     $('#returnItems').innerHTML = outstanding.map(item => `<div class="photo-row"><strong>${esc(displayItemName_(item))} × ${item.quantity}</strong><span>${esc(item.code)}｜每一件器材各拍一張歸還照片</span>${photoPickers_(item, 'return')}</div>`).join('');
+    $('#returnSignatureBlock').hidden = false;
+    clearSignature_('return');
     $('#returnSubmit').hidden = false;
     keepModalAtTop_('returnDialog');
   } catch (error) { toast(error.message); }
@@ -741,6 +860,11 @@ $('#managerResults').onclick = event => {
   openReturn(button.dataset.managedReturn, managerAdminKey_);
 };
 
+document.addEventListener('click', event => {
+  const clearButton = event.target.closest('[data-clear-signature]');
+  if (clearButton) clearSignature_(clearButton.dataset.clearSignature);
+});
+
 let lastScrollPosition_ = window.scrollY;
 window.addEventListener('scroll', () => {
   const categories = $('#categories');
@@ -783,6 +907,8 @@ $('#checkoutForm').onsubmit = async event => {
   event.preventDefault();
   const formElement = event.currentTarget;
   if (!validateBorrower_(formElement)) return;
+  let signature;
+  try { signature = signatureDataUrl_('checkout'); } catch (error) { toast(error.message); return; }
   const submit = $('#checkoutSubmit');
   submit.disabled = true;
   submit.textContent = '正在整理照片並送出…';
@@ -791,10 +917,10 @@ $('#checkoutForm').onsubmit = async event => {
     const form = new FormData(formElement);
     const selectedItems = [...cart.values()];
     const requestItems = await Promise.all(selectedItems.map(async item => ({ ...item, checkOutPhotos: await Promise.all([...document.querySelectorAll(`[data-checkout-photo="${CSS.escape(item.code)}"]`)].map(fileAsDataUrl)) })));
-    const result = await post({ action: 'request', borrower: { name: form.get('name').trim(), studentId: form.get('studentId').trim(), phone: form.get('phone').trim(), email: form.get('email').trim() }, loan: { start: form.get('loanStart'), expectedReturn: form.get('expectedReturn') }, items: requestItems });
+    const result = await post({ action: 'request', borrower: { name: form.get('name').trim(), studentId: form.get('studentId').trim(), phone: form.get('phone').trim(), email: form.get('email').trim() }, loan: { start: form.get('loanStart'), expectedReturn: form.get('expectedReturn') }, items: requestItems, signature });
     const email = form.get('email').trim();
-    cart.clear(); updateCart(); $('#checkoutDialog').close(); formElement.reset(); showSuccess(result, email, selectedItems);
-  } catch (error) { toast(error.message); }
+    cart.clear(); updateCart(); $('#checkoutDialog').close(); formElement.reset(); clearSignature_('checkout'); showSuccess(result, email, selectedItems);
+  } catch (error) { resetTurnstile_('checkoutSecurity'); toast(error.message); }
   finally { $('#checkoutProgress').hidden = true; submit.disabled = false; submit.textContent = '送出借用申請'; }
 };
 
@@ -802,6 +928,8 @@ $('#returnForm').onsubmit = async event => {
   event.preventDefault();
   const formElement = event.currentTarget;
   if (!formElement.checkValidity()) return formElement.reportValidity();
+  let signature;
+  try { signature = signatureDataUrl_('return'); } catch (error) { toast(error.message); return; }
   const submit = $('#returnSubmit');
   submit.disabled = true;
   submit.textContent = '處理中…';
@@ -815,9 +943,9 @@ $('#returnForm').onsubmit = async event => {
       photoInputs.get(code).push(input);
     });
     const returnItems = await Promise.all([...photoInputs].map(async ([code, inputs]) => ({ code, returnPhotos: await Promise.all(inputs.map(input => fileAsDataUrl(input, 'return'))) })));
-    const result = await post({ action: 'return', requestId: form.get('requestId'), returnCode: form.get('returnCode'), adminKey: form.get('adminKey'), items: returnItems });
-    $('#returnDialog').close(); formElement.reset(); toast(result.message);
-  } catch (error) { toast(error.message); }
+    const result = await post({ action: 'return', requestId: form.get('requestId'), returnCode: form.get('returnCode'), adminKey: form.get('adminKey'), items: returnItems, signature });
+    $('#returnDialog').close(); formElement.reset(); clearSignature_('return'); toast(result.message);
+  } catch (error) { if (!formElement.elements.adminKey.value) resetTurnstile_('returnSecurity'); toast(error.message); }
   finally {
     $('#returnProgress').hidden = true;
     submit.disabled = false;
