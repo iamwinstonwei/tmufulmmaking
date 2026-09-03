@@ -542,13 +542,15 @@ function openReturn(requestId = '', adminKey = '') {
 
 async function fileAsDataUrl(input, profile = 'checkout') {
   const prepared = preparedPhotoData_.get(input);
-  if (prepared) return prepared;
+  const file = input.files?.[0];
+  if (prepared?.file === file && prepared.profile === profile) return prepared.task;
   const task = preparePhotoData_(input, profile);
-  preparedPhotoData_.set(input, task);
+  const entry = { file, profile, task };
+  preparedPhotoData_.set(input, entry);
   try {
     return await task;
   } catch (error) {
-    preparedPhotoData_.delete(input);
+    if (preparedPhotoData_.get(input) === entry) preparedPhotoData_.delete(input);
     throw error;
   }
 }
@@ -712,29 +714,75 @@ async function secureUploadSignature_(uploadToken, stage, signatureDataUrl) {
   if (!response.ok || !result.ok) throw new Error(result.message || '電子簽名上傳失敗。');
 }
 
+async function secureUploadAssets_(uploadToken, stage, items, signatureDataUrl) {
+  const jobs = items.flatMap(item => {
+    const photos = stage === 'checkout' ? item.checkOutPhotos : item.returnPhotos;
+    return photos.map((photo, index) => ({ item, photo, index }));
+  });
+  const signature = dataUrlBlob_(signatureDataUrl);
+  if (signature.type !== 'image/png') throw new Error('電子簽名格式不正確，請清除後重新簽名。');
+  const batches = [];
+  for (let offset = 0; offset < jobs.length; offset += 6) batches.push(jobs.slice(offset, offset + 6));
+  let completed = 0;
+  const startedAt = performance.now();
+  const uploadBatch = async (batch, batchIndex) => {
+    const body = new FormData();
+    body.set('metadata', JSON.stringify(batch.map(({ item, photo, index }, fileIndex) => ({
+      field: `photo${fileIndex}`, code: item.code, index: index + 1, contentType: photo.blob.type
+    }))));
+    batch.forEach(({ photo }, index) => body.set(`photo${index}`, photo.blob, `photo-${index}.jpg`));
+    if (batchIndex === 0) body.set('signature', signature, 'signature.png');
+    const response = await fetch(secureApiUrl_('/api/assets'), {
+      method: 'POST', headers: { 'X-Upload-Ticket': uploadToken, 'X-Asset-Stage': stage }, body
+    });
+    let result;
+    try { result = await response.json(); } catch (_) { throw new Error('批次上傳服務回應格式錯誤。'); }
+    if (!response.ok || !result.ok) throw new Error(result.message || '照片與簽名上傳失敗。');
+    completed += batch.length;
+    const progress = stage === 'checkout' ? $('#checkoutProgress span') : $('#returnProgress span');
+    if (progress) progress.textContent = `正在安全儲存照片 ${completed}／${jobs.length}，請勿關閉此頁面。`;
+  };
+  for (let index = 0; index < batches.length; index += 2) {
+    await Promise.all(batches.slice(index, index + 2).map((batch, relativeIndex) => uploadBatch(batch, index + relativeIndex)));
+  }
+  return Math.round(performance.now() - startedAt);
+}
+
 async function secureRequest_(data) {
+  const totalStartedAt = performance.now();
   const turnstileToken = await turnstileToken_('checkoutSecurity', 'loan-request');
+  const startStartedAt = performance.now();
   const started = await secureJson_('/api/loan/start', {
     borrower: data.borrower,
     loan: data.loan,
     items: data.items.map(item => ({ code: item.code, name: item.name, quantity: item.quantity })),
     turnstileToken
   });
-  await secureUploadPhotos_(started.uploadToken, 'checkout', data.items);
-  await secureUploadSignature_(started.uploadToken, 'checkout', data.signature);
-  return secureJson_('/api/loan/finalize', { uploadToken: started.uploadToken });
+  const startMs = Math.round(performance.now() - startStartedAt);
+  const uploadMs = await secureUploadAssets_(started.uploadToken, 'checkout', data.items, data.signature);
+  const finalizeStartedAt = performance.now();
+  const result = await secureJson_('/api/loan/finalize', { uploadToken: started.uploadToken });
+  const timings = { startMs, uploadMs, finalizeMs: Math.round(performance.now() - finalizeStartedAt), totalMs: Math.round(performance.now() - totalStartedAt) };
+  console.info('[TMU upload timing]', timings);
+  return { ...result, timings };
 }
 
 async function secureReturn_(data) {
+  const totalStartedAt = performance.now();
   const isAdmin = Boolean(data.adminKey);
+  const startStartedAt = performance.now();
   const started = await secureJson_('/api/return/start', {
     requestId: data.requestId,
     returnCode: data.returnCode,
     ...(isAdmin ? {} : { turnstileToken: await turnstileToken_('returnSecurity', 'equipment-return') })
   }, data.adminKey);
-  await secureUploadPhotos_(started.uploadToken, 'return', data.items);
-  await secureUploadSignature_(started.uploadToken, 'return', data.signature);
-  return secureJson_('/api/return/finalize', { uploadToken: started.uploadToken }, data.adminKey);
+  const startMs = Math.round(performance.now() - startStartedAt);
+  const uploadMs = await secureUploadAssets_(started.uploadToken, 'return', data.items, data.signature);
+  const finalizeStartedAt = performance.now();
+  const result = await secureJson_('/api/return/finalize', { uploadToken: started.uploadToken }, data.adminKey);
+  const timings = { startMs, uploadMs, finalizeMs: Math.round(performance.now() - finalizeStartedAt), totalMs: Math.round(performance.now() - totalStartedAt) };
+  console.info('[TMU upload timing]', timings);
+  return { ...result, timings };
 }
 
 async function post(data) {
@@ -785,7 +833,7 @@ function openManager() {
 }
 
 function showSuccess(result, borrowerEmail, requestedItems) {
-  const emailNote = result.emailSent ? `確認信已寄到 <b>${esc(borrowerEmail)}</b>。` : '申請已儲存，但確認信寄送失敗；請立即記下以下資料。';
+  const emailNote = result.emailSent ? `確認信已寄到 <b>${esc(borrowerEmail)}</b>。` : result.emailQueued ? `申請已儲存，確認信正在背景寄送至 <b>${esc(borrowerEmail)}</b>；請先記下以下資料。` : '申請已儲存，但確認信寄送失敗；請立即記下以下資料。';
   $('#successContent').innerHTML = `<p class="note">申請資料已完成儲存，${emailNote}</p>
     <div class="manager-result"><h3>借用編號：${esc(result.requestId)}</h3><p><b>歸還驗證碼：${esc(result.returnCode)}</b></p><p>歸還時須同時輸入借用編號與驗證碼，請勿分享給他人。</p>
     <p>${requestedItems.map(item => `${esc(displayItemName_(item))} × ${item.quantity}`).join('、')}</p></div>`;
@@ -885,7 +933,13 @@ document.addEventListener('change', event => {
   if (!input.matches('[data-checkout-photo], [data-return-photo]')) return;
   const picker = input.closest('.photo-picker');
   const label = picker?.querySelector('.photo-picker-label');
-  if (!input.files?.length) return;
+  if (!input.files?.length) {
+    photoPreparationTokens_.delete(input);
+    preparedPhotoData_.delete(input);
+    if (label) label.textContent = '請選擇照片（必填）';
+    picker?.classList.remove('is-uploaded');
+    return;
+  }
   const profile = input.matches('[data-return-photo]') ? 'return' : 'checkout';
   const token = Symbol('photo-preparation');
   photoPreparationTokens_.set(input, token);
@@ -894,7 +948,7 @@ document.addEventListener('change', event => {
   picker?.classList.remove('is-uploaded');
   fileAsDataUrl(input, profile).then(() => {
     if (photoPreparationTokens_.get(input) !== token) return;
-    if (label) label.textContent = '已上傳';
+    if (label) label.textContent = '照片已準備好，送出時上傳';
     if (picker) {
       picker.classList.remove('is-uploaded');
       requestAnimationFrame(() => picker.classList.add('is-uploaded'));
@@ -919,7 +973,7 @@ $('#checkoutForm').onsubmit = async event => {
   try {
     const form = new FormData(formElement);
     const selectedItems = [...cart.values()];
-    const requestItems = await Promise.all(selectedItems.map(async item => ({ ...item, checkOutPhotos: await Promise.all([...document.querySelectorAll(`[data-checkout-photo="${CSS.escape(item.code)}"]`)].map(fileAsDataUrl)) })));
+    const requestItems = await Promise.all(selectedItems.map(async item => ({ ...item, checkOutPhotos: await Promise.all([...document.querySelectorAll(`[data-checkout-photo="${CSS.escape(item.code)}"]`)].map(input => fileAsDataUrl(input, 'checkout'))) })));
     const result = await post({ action: 'request', borrower: { name: form.get('name').trim(), studentId: form.get('studentId').trim(), phone: form.get('phone').trim(), email: form.get('email').trim() }, loan: { start: form.get('loanStart'), expectedReturn: form.get('expectedReturn') }, items: requestItems, signature });
     const email = form.get('email').trim();
     cart.clear(); updateCart(); $('#checkoutDialog').close(); formElement.reset(); clearSignature_('checkout'); showSuccess(result, email, selectedItems);
