@@ -1,5 +1,9 @@
 const SHEET = 'https://docs.google.com/spreadsheets/d/1jBz_IorugDWW_bMys70GMc9bSNaSGT31BSN9HJ65Mh0/gviz/tq?gid=1691888158&tqx=out:json%3BresponseHandler:inventoryResponse';
-const API_URL = 'https://script.google.com/macros/s/AKfycbyUcZU0qOT-1wMUBvSy7iFepJGN4_3GZD87Ik7ilpzJFlThVydDteA0xFCUDf7FL4V53g/exec';
+const LEGACY_API_URL = 'https://script.google.com/macros/s/AKfycbyUcZU0qOT-1wMUBvSy7iFepJGN4_3GZD87Ik7ilpzJFlThVydDteA0xFCUDf7FL4V53g/exec';
+const CLOUDFLARE = window.TMU_CLOUDFLARE || {};
+const CLOUDFLARE_API_URL = String(CLOUDFLARE.apiUrl || '').replace(/\/+$/, '');
+const USING_CLOUDFLARE = Boolean(CLOUDFLARE_API_URL && CLOUDFLARE.turnstileSiteKey);
+const API_URL = USING_CLOUDFLARE ? CLOUDFLARE_API_URL : LEGACY_API_URL;
 const INVENTORY_CACHE_KEY = 'tmu-equipment-inventory-v2';
 const INVENTORY_CACHE_MAX_AGE = 12 * 60 * 60 * 1000;
 
@@ -9,6 +13,7 @@ let inventoryFingerprint_ = '';
 const cart = new Map();
 const preparedPhotoData_ = new WeakMap();
 const photoPreparationTokens_ = new WeakMap();
+let managerAdminKey_ = '';
 const $ = selector => document.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' }[char]));
 const categoryName = category => (category || '其他').replace(/^\d+/, '') || '其他';
@@ -374,16 +379,37 @@ function openCheckout() {
   </div>`).join('');
   $('#checkoutDialog').showModal();
   keepModalAtTop_('checkoutDialog');
+  resetTurnstile_('checkoutSecurity');
+  mountTurnstile_('checkoutSecurity', 'loan-request');
 }
 
 function keepModalAtTop_(dialogId) {
-  const scrollArea = $(`#${dialogId} .modal-scroll`);
-  if (!scrollArea) return;
-  // 手機瀏覽器的自動填入會在彈窗開啟後改寫捲動位置；短暫鎖定在表單起點。
-  const reset = () => { scrollArea.scrollTop = 0; };
+  const dialog = $(`#${dialogId}`);
+  const scrollArea = dialog?.querySelector('.modal-scroll');
+  if (!dialog || !scrollArea) return;
+  const reset = () => {
+    dialog.scrollTop = 0;
+    scrollArea.scrollTop = 0;
+  };
+  // iOS 會在顯示原生自動填寫選單後才調整捲動位置，因此要跨過幾個繪製週期再校正一次。
   reset();
   requestAnimationFrame(reset);
-  window.setTimeout(reset, 160);
+  [140, 420].forEach(delay => window.setTimeout(reset, delay));
+
+  if (dialog.dataset.autofillScrollGuard === 'ready') return;
+  dialog.dataset.autofillScrollGuard = 'ready';
+  const restoreAfterAutofill = () => {
+    requestAnimationFrame(reset);
+    window.setTimeout(reset, 80);
+  };
+  // Safari 的聯絡人／密碼自動填寫通常會以 replacement text 事件送入欄位。
+  dialog.addEventListener('input', event => {
+    if (event.inputType === 'insertReplacementText') restoreAfterAutofill();
+  });
+  // 部分 iOS 版本不送出 inputType，改由 -webkit-autofill 動畫作為備援訊號。
+  dialog.addEventListener('animationstart', event => {
+    if (event.animationName === 'autofill-detected') restoreAfterAutofill();
+  });
 }
 
 function photoPickers_(item, stage) {
@@ -397,17 +423,25 @@ function localDateValue(date) {
   return new Date(date.getTime() - offset).toISOString().slice(0, 10);
 }
 
-function openReturn(requestId = '') {
+function openReturn(requestId = '', adminKey = '') {
   const form = $('#returnForm');
   // 直接綁定 click 時瀏覽器會傳入 PointerEvent；它不是申請編號。
   const cleanRequestId = typeof requestId === 'string' ? requestId.trim() : '';
+  const cleanAdminKey = typeof adminKey === 'string' ? adminKey : '';
   form.reset();
   $('#returnItems').innerHTML = '';
   $('#returnSubmit').hidden = true;
   $('#returnProgress').hidden = true;
   form.elements.requestId.value = cleanRequestId;
+  form.elements.adminKey.value = cleanAdminKey;
+  $('#returnCodeField').hidden = Boolean(cleanAdminKey);
+  form.elements.returnCode.required = !cleanAdminKey;
   $('#returnDialog').showModal();
   keepModalAtTop_('returnDialog');
+  if (!cleanAdminKey) {
+    resetTurnstile_('returnSecurity');
+    mountTurnstile_('returnSecurity', 'equipment-return');
+  }
   if (cleanRequestId) lookupReturn();
 }
 
@@ -460,7 +494,137 @@ async function compressPhoto_(file, options) {
   }
 }
 
+let turnstileScript_;
+const turnstileWidgets_ = new Map();
+
+function secureApiUrl_(path) { return `${CLOUDFLARE_API_URL}${path}`; }
+
+function loadTurnstile_() {
+  if (!USING_CLOUDFLARE) return Promise.resolve();
+  if (window.turnstile) return Promise.resolve();
+  if (turnstileScript_) return turnstileScript_;
+  turnstileScript_ = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+    script.async = true;
+    script.onload = resolve;
+    script.onerror = () => reject(new Error('安全驗證載入失敗，請確認網路後重試。'));
+    document.head.appendChild(script);
+  });
+  return turnstileScript_;
+}
+
+async function mountTurnstile_(elementId, action) {
+  if (!USING_CLOUDFLARE) return;
+  const host = $(`#${elementId}`);
+  if (!host) return;
+  host.hidden = false;
+  await loadTurnstile_();
+  if (turnstileWidgets_.has(elementId)) return;
+  const id = window.turnstile.render(host, {
+    sitekey: CLOUDFLARE.turnstileSiteKey,
+    action,
+    theme: 'light',
+    size: 'flexible'
+  });
+  turnstileWidgets_.set(elementId, id);
+}
+
+async function turnstileToken_(elementId, action) {
+  if (!USING_CLOUDFLARE) return '';
+  await mountTurnstile_(elementId, action);
+  const id = turnstileWidgets_.get(elementId);
+  const token = id === undefined ? '' : window.turnstile.getResponse(id);
+  if (!token) throw new Error('請先完成安全驗證。');
+  return token;
+}
+
+function resetTurnstile_(elementId) {
+  const id = turnstileWidgets_.get(elementId);
+  if (USING_CLOUDFLARE && id !== undefined && window.turnstile) window.turnstile.reset(id);
+}
+
+async function secureJson_(path, body, adminKey = '') {
+  const response = await fetch(secureApiUrl_(path), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(adminKey ? { 'X-Admin-Key': adminKey } : {}) },
+    body: JSON.stringify(body)
+  });
+  let result;
+  try { result = await response.json(); } catch (_) { throw new Error('安全資料服務回應格式錯誤。'); }
+  if (!response.ok || !result.ok) throw new Error(result.message || '送出失敗。');
+  return result;
+}
+
+function dataUrlBlob_(dataUrl) {
+  const [header, payload] = String(dataUrl || '').split(',', 2);
+  const match = header.match(/^data:(image\/(?:jpeg|png|webp));base64$/i);
+  if (!match || !payload) throw new Error('照片格式不正確，請重新選擇照片。');
+  const binary = atob(payload);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+  return new Blob([bytes], { type: match[1].toLowerCase() });
+}
+
+async function secureUploadPhotos_(uploadToken, stage, items) {
+  let completed = 0;
+  const total = items.reduce((sum, item) => sum + (stage === 'checkout' ? item.checkOutPhotos : item.returnPhotos).length, 0);
+  for (const item of items) {
+    const photos = stage === 'checkout' ? item.checkOutPhotos : item.returnPhotos;
+    for (let index = 0; index < photos.length; index++) {
+      const photo = photos[index];
+      const response = await fetch(secureApiUrl_('/api/upload'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': dataUrlBlob_(photo.dataUrl).type,
+          'X-Upload-Ticket': uploadToken,
+          'X-Photo-Stage': stage,
+          'X-Equipment-Code': item.code,
+          'X-Photo-Index': String(index + 1)
+        },
+        body: dataUrlBlob_(photo.dataUrl)
+      });
+      let result;
+      try { result = await response.json(); } catch (_) { throw new Error('照片上傳服務回應格式錯誤。'); }
+      if (!response.ok || !result.ok) throw new Error(result.message || '照片上傳失敗。');
+      completed++;
+      const progress = stage === 'checkout' ? $('#checkoutProgress span') : $('#returnProgress span');
+      if (progress) progress.textContent = `正在安全上傳照片 ${completed}／${total}，請勿關閉此頁面。`;
+    }
+  }
+}
+
+async function secureRequest_(data) {
+  const turnstileToken = await turnstileToken_('checkoutSecurity', 'loan-request');
+  const started = await secureJson_('/api/loan/start', {
+    borrower: data.borrower,
+    loan: data.loan,
+    items: data.items.map(item => ({ code: item.code, name: item.name, quantity: item.quantity })),
+    turnstileToken
+  });
+  await secureUploadPhotos_(started.uploadToken, 'checkout', data.items);
+  return secureJson_('/api/loan/finalize', { uploadToken: started.uploadToken });
+}
+
+async function secureReturn_(data) {
+  const isAdmin = Boolean(data.adminKey);
+  const started = await secureJson_('/api/return/start', {
+    requestId: data.requestId,
+    returnCode: data.returnCode,
+    ...(isAdmin ? {} : { turnstileToken: await turnstileToken_('returnSecurity', 'equipment-return') })
+  }, data.adminKey);
+  await secureUploadPhotos_(started.uploadToken, 'return', data.items);
+  return secureJson_('/api/return/finalize', { uploadToken: started.uploadToken }, data.adminKey);
+}
+
 async function post(data) {
+  if (USING_CLOUDFLARE) {
+    if (data.action === 'request') return secureRequest_(data);
+    if (data.action === 'lookup') return secureJson_('/api/return/lookup', { requestId: data.requestId, returnCode: data.returnCode }, data.adminKey);
+    if (data.action === 'return') return secureReturn_(data);
+    if (data.action === 'manageSearch') return secureJson_('/api/manage/search', { name: data.name }, data.adminKey);
+    throw new Error('不支援的資料操作。');
+  }
   if (!API_URL) throw new Error('系統尚未連接資料庫。請先依 apps-script/README.md 部署後端，並把 Web App /exec 網址填入 app.js 的 API_URL。');
   const response = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(data) });
   const body = await response.text();
@@ -476,12 +640,13 @@ async function post(data) {
 async function lookupReturn() {
   if (!API_URL) return toast('請先完成 Apps Script 後端部署。');
   const form = new FormData($('#returnForm'));
-  const requestId = form.get('requestId');
+  const requestId = String(form.get('requestId') || '').trim();
+  const returnCode = String(form.get('returnCode') || '').trim();
+  const adminKey = String(form.get('adminKey') || '');
   if (!requestId) return toast('請先填寫申請編號。');
+  if (!adminKey && !returnCode) return toast('請輸入確認信中的歸還驗證碼。');
   try {
-    const response = await fetch(`${API_URL}?action=lookup&requestId=${encodeURIComponent(requestId)}`);
-    const result = await response.json();
-    if (!result.ok) throw new Error(result.message);
+    const result = await post({ action: 'lookup', requestId, returnCode, adminKey });
     const outstanding = result.items.filter(item => !item.returned);
     if (!outstanding.length) return toast('這筆申請沒有待歸還的器材。');
     $('#returnItems').innerHTML = outstanding.map(item => `<div class="photo-row"><strong>${esc(displayItemName_(item))} × ${item.quantity}</strong><span>${esc(item.code)}｜每一件器材各拍一張歸還照片</span>${photoPickers_(item, 'return')}</div>`).join('');
@@ -491,14 +656,16 @@ async function lookupReturn() {
 }
 
 function openManager() {
+  managerAdminKey_ = '';
   $('#managerResults').innerHTML = '';
   $('#manageDialog').showModal();
+  keepModalAtTop_('manageDialog');
 }
 
 function showSuccess(result, borrowerEmail, requestedItems) {
-  const emailNote = result.emailSent ? `確認信已寄到 <b>${esc(borrowerEmail)}</b>。` : '申請已儲存，但確認信寄送失敗；請記下借用編號。';
+  const emailNote = result.emailSent ? `確認信已寄到 <b>${esc(borrowerEmail)}</b>。` : '申請已儲存，但確認信寄送失敗；請立即記下以下資料。';
   $('#successContent').innerHTML = `<p class="note">申請資料已完成儲存，${emailNote}</p>
-    <div class="manager-result"><h3>借用編號：${esc(result.requestId)}</h3><p>請保留此編號，歸還器材時會需要使用。</p>
+    <div class="manager-result"><h3>借用編號：${esc(result.requestId)}</h3><p><b>歸還驗證碼：${esc(result.returnCode)}</b></p><p>歸還時須同時輸入借用編號與驗證碼，請勿分享給他人。</p>
     <p>${requestedItems.map(item => `${esc(displayItemName_(item))} × ${item.quantity}`).join('、')}</p></div>`;
   $('#successDialog').showModal();
 }
@@ -512,6 +679,7 @@ async function searchManager() {
   results.innerHTML = '<p class="note">正在搜尋借用紀錄…</p>';
   try {
     const result = await post({ action: 'manageSearch', adminKey, name });
+    managerAdminKey_ = adminKey;
     const requests = result.requests || [];
     results.innerHTML = requests.length ? requests.map(request => `<article class="manager-result">
       <h3>${esc(request.name)} <span class="tag">${esc(request.status)}</span></h3>
@@ -570,7 +738,7 @@ $('#managerResults').onclick = event => {
   const button = event.target.closest('[data-managed-return]');
   if (!button) return;
   $('#manageDialog').close();
-  openReturn(button.dataset.managedReturn);
+  openReturn(button.dataset.managedReturn, managerAdminKey_);
 };
 
 let lastScrollPosition_ = window.scrollY;
@@ -647,7 +815,7 @@ $('#returnForm').onsubmit = async event => {
       photoInputs.get(code).push(input);
     });
     const returnItems = await Promise.all([...photoInputs].map(async ([code, inputs]) => ({ code, returnPhotos: await Promise.all(inputs.map(input => fileAsDataUrl(input, 'return'))) })));
-    const result = await post({ action: 'return', requestId: form.get('requestId'), items: returnItems });
+    const result = await post({ action: 'return', requestId: form.get('requestId'), returnCode: form.get('returnCode'), adminKey: form.get('adminKey'), items: returnItems });
     $('#returnDialog').close(); formElement.reset(); toast(result.message);
   } catch (error) { toast(error.message); }
   finally {
