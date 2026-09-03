@@ -1,4 +1,3 @@
-const SHEET = 'https://docs.google.com/spreadsheets/d/1jBz_IorugDWW_bMys70GMc9bSNaSGT31BSN9HJ65Mh0/gviz/tq?gid=1691888158&tqx=out:json%3BresponseHandler:inventoryResponse';
 const LEGACY_API_URL = 'https://script.google.com/macros/s/AKfycbyUcZU0qOT-1wMUBvSy7iFepJGN4_3GZD87Ik7ilpzJFlThVydDteA0xFCUDf7FL4V53g/exec';
 const CLOUDFLARE = window.TMU_CLOUDFLARE || {};
 const CLOUDFLARE_API_URL = String(CLOUDFLARE.apiUrl || '').replace(/\/+$/, '');
@@ -562,9 +561,9 @@ async function preparePhotoData_(input, profile = 'checkout') {
   const options = profile === 'return'
     ? { longestEdge: 1024, quality: 0.62, maxBytes: 1200 * 1024 }
     : { longestEdge: 1280, quality: 0.68, maxBytes: 1800 * 1024 };
-  const dataUrl = await compressPhoto_(file, options);
-  if (Math.floor(dataUrl.length * 3 / 4) > options.maxBytes) throw new Error('照片壓縮後仍過大，請重新拍攝或選擇較小的照片。');
-  return { dataUrl };
+  const blob = await compressPhoto_(file, options);
+  if (blob.size > options.maxBytes) throw new Error('照片壓縮後仍過大，請重新拍攝或選擇較小的照片。');
+  return { blob };
 }
 
 function readFileAsDataUrl(file) {
@@ -572,7 +571,7 @@ function readFileAsDataUrl(file) {
 }
 
 async function compressPhoto_(file, options) {
-  if (!/^image\//i.test(file.type)) return readFileAsDataUrl(file);
+  if (!/^image\//i.test(file.type)) throw new Error('照片格式不正確，請重新選擇。');
   const objectUrl = URL.createObjectURL(file);
   try {
     // 直接解碼檔案，不先把原始相片轉為巨大 Base64 字串，能避免手機短暫卡住與記憶體暴增。
@@ -582,9 +581,10 @@ async function compressPhoto_(file, options) {
     canvas.width = Math.max(1, Math.round(image.width * scale));
     canvas.height = Math.max(1, Math.round(image.height * scale));
     canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/jpeg', options.quality);
+    return await new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('照片壓縮失敗。')), 'image/jpeg', options.quality));
   } catch (error) {
-    return readFileAsDataUrl(file);
+    if (/^image\/(?:jpeg|png|webp)$/i.test(file.type) && file.size <= options.maxBytes) return file;
+    throw new Error('無法處理這張照片，請改用相機重新拍攝。');
   } finally {
     URL.revokeObjectURL(objectUrl);
   }
@@ -664,21 +664,22 @@ function dataUrlBlob_(dataUrl) {
 
 async function secureUploadPhotos_(uploadToken, stage, items) {
   let completed = 0;
-  const total = items.reduce((sum, item) => sum + (stage === 'checkout' ? item.checkOutPhotos : item.returnPhotos).length, 0);
-  for (const item of items) {
+  const jobs = items.flatMap(item => {
     const photos = stage === 'checkout' ? item.checkOutPhotos : item.returnPhotos;
-    for (let index = 0; index < photos.length; index++) {
-      const photo = photos[index];
+    return photos.map((photo, index) => ({ item, photo, index }));
+  });
+  const total = jobs.length;
+  const upload = async ({ item, photo, index }) => {
       const response = await fetch(secureApiUrl_('/api/upload'), {
         method: 'POST',
         headers: {
-          'Content-Type': dataUrlBlob_(photo.dataUrl).type,
+          'Content-Type': photo.blob.type,
           'X-Upload-Ticket': uploadToken,
           'X-Photo-Stage': stage,
           'X-Equipment-Code': item.code,
           'X-Photo-Index': String(index + 1)
         },
-        body: dataUrlBlob_(photo.dataUrl)
+        body: photo.blob
       });
       let result;
       try { result = await response.json(); } catch (_) { throw new Error('照片上傳服務回應格式錯誤。'); }
@@ -686,8 +687,10 @@ async function secureUploadPhotos_(uploadToken, stage, items) {
       completed++;
       const progress = stage === 'checkout' ? $('#checkoutProgress span') : $('#returnProgress span');
       if (progress) progress.textContent = `正在安全上傳照片 ${completed}／${total}，請勿關閉此頁面。`;
-    }
-  }
+  };
+  // 先完成第一張，確保雲端專屬資料夾已建立；其餘最多兩張並行，兼顧速度與 Drive 穩定性。
+  if (jobs.length) await upload(jobs[0]);
+  for (let index = 1; index < jobs.length; index += 2) await Promise.all(jobs.slice(index, index + 2).map(upload));
 }
 
 async function secureUploadSignature_(uploadToken, stage, signatureDataUrl) {
@@ -992,17 +995,9 @@ function loadInventoryCache_() {
 
 function loadError() {
   if (hasInventoryCache_) return toast('暫時無法更新器材資料，已先顯示最近一次資料。');
-  $('#grid').innerHTML = '<div class="empty">目前無法載入 Google 試算表。請確認分享設定為「知道連結的任何人皆可檢視」後重新整理。</div>';
+  $('#grid').innerHTML = '<div class="empty">目前無法載入器材資料，請稍後重新整理。</div>';
   $('#resultText').textContent = '載入失敗';
 }
-
-window.inventoryResponse = payload => {
-  if (payload.status !== 'ok') return loadError();
-  const rows = payload.table.rows.map(row => row.c.map(cell => cell && cell.v !== null ? String(cell.v) : ''));
-  const latestInventory = normalise([[], ...rows]);
-  saveInventoryCache_(latestInventory);
-  setInventory_(latestInventory);
-};
 
 const cachedInventory = loadInventoryCache_();
 const seededInventory = Array.isArray(window.INVENTORY_SEED_ROWS)
@@ -1014,9 +1009,19 @@ if (initialInventory) {
   setInventory_(initialInventory);
 }
 
-const source = document.createElement('script');
-source.async = true;
-// 快取內容已經先顯示；背景更新加上版本參數，避免 Google 試算表回傳過期內容。
-source.src = `${SHEET}&cacheBust=${Date.now()}`;
-source.onerror = loadError;
-document.head.appendChild(source);
+async function refreshInventory_() {
+  if (!USING_CLOUDFLARE) return;
+  try {
+    const response = await fetch(secureApiUrl_('/api/inventory'), { headers: { Accept: 'application/json' } });
+    const result = await response.json();
+    if (!response.ok || !result.ok || !Array.isArray(result.rows)) throw new Error(result.message || '器材清單回應異常。');
+    const inventoryRows = result.rows.filter(row => row[1] && row[2] && row[1] !== '財產編號' && row[2] !== '器材');
+    const latestInventory = normalise([[], ...inventoryRows]);
+    saveInventoryCache_(latestInventory);
+    setInventory_(latestInventory);
+  } catch (error) {
+    loadError();
+  }
+}
+
+refreshInventory_();
