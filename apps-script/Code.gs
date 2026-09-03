@@ -362,7 +362,7 @@ function internalSendEmail_(data) {
   const email = String(borrower.email || '').trim();
   const code = normalizeReturnCode_(data.returnCode);
   require_(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email), '電子信箱格式不正確。');
-  require_(String(borrower.name || '').trim() && /^\d{12}$/.test(code), '確認信資料不正確。');
+  require_(String(borrower.name || '').trim() && /^[A-F0-9]{12}$/.test(code), '確認信資料不正確。');
   require_(items.length > 0 && items.length <= MAX_ITEMS_PER_REQUEST, '確認信器材資料不正確。');
   const emailSent = sendRequestEmail_(email, String(borrower.name).trim(), String(data.requestId), code, loan, items);
   return { ok: true, emailSent: emailSent };
