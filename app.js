@@ -79,7 +79,7 @@ function applyDesign_(shouldRemember = false) {
   document.body.dataset.density = design.density;
   $('#siteEyebrow').textContent = design.eyebrow || DAYPAY_DESIGN.eyebrow;
   $('#siteTitle').textContent = design.title || DAYPAY_DESIGN.title;
-  $('#siteSubtitle').textContent = design.subtitle || DAYPAY_DESIGN.subtitle;
+  $('#siteSubtitle').textContent = '';
   if (shouldRemember) localStorage.setItem(DESIGN_STORAGE_KEY, JSON.stringify(design));
 }
 
@@ -209,18 +209,61 @@ function setInventory_(nextItems) {
   setup();
 }
 
+function inventoryBrand_(name) {
+  // Count explicit brand prefixes only; generic equipment names are not brands.
+  const prefix = String(name).trim().toLowerCase();
+  if (/^small\s*rig\b/.test(prefix.replace(/_/g, ' '))) return 'smallrig';
+  if (/^zitay?(?:[/_\s]|$)/.test(prefix)) return 'zitay';
+  if (/^sound\s*core\b/.test(prefix)) return 'soundcore';
+  return prefix.match(/^(sony|sigma|kamera|swit|cityork|tilta|sandisk|dajingyu|lexar|pgytech|aputure|zhiyun|dji|libec|benro|manfrotto|hollyland|rode|zoom|asus|moma|vidafun|godox|atomos|samsung|avermedia|msi|vsgo|desview)(?=[/_\s]|$)/)?.[1] || '';
+}
+
+let heroStatsAnimated_ = false;
+function updateHeroStats_(categoryCount) {
+  const brandCount = new Set(items.map(item => inventoryBrand_(item.name)).filter(Boolean)).size;
+  const animate = !heroStatsAnimated_ && items.length > 0 && !matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (items.length) heroStatsAnimated_ = true;
+  for (const [statIndex, [id, value]] of [['itemCount', items.length], ['categoryCount', categoryCount], ['brandCount', brandCount]].entries()) {
+    const el = $('#' + id);
+    el.getAnimations({subtree:true}).forEach(animation => animation.cancel());
+    el.replaceChildren();
+    el.setAttribute('aria-label', String(value));
+    if (!animate) { el.textContent = value; continue; }
+    for (const [index, digit] of [...String(value)].entries()) {
+      const windowEl = document.createElement('span');
+      windowEl.className = 'stat-digit';
+      windowEl.setAttribute('aria-hidden', 'true');
+      const reel = document.createElement('span');
+      reel.className = 'stat-reel';
+      const steps = 10 + Number(digit);
+      for (let i = 0; i <= steps; i++) {
+        const number = document.createElement('span');
+        number.textContent = i % 10;
+        reel.append(number);
+      }
+      windowEl.append(reel);
+      el.append(windowEl);
+      const finalTransform = `translateY(-${steps}em)`;
+      reel.style.transform = finalTransform;
+      reel.animate([{transform:'translateY(0)'}, {transform:finalTransform}], {
+        duration:1900, delay:statIndex * 260 + index * 90, easing:'cubic-bezier(.5,0,.5,1)', fill:'backwards'
+      });
+    }
+  }
+}
+
 function setup() {
   const categories = [...new Set(items.map(item => item.category))];
   const ownerSelect = $('#owner');
   const selectedOwner = ownerSelect.value;
   if (activeCategory && !categories.includes(activeCategory)) activeCategory = '';
-  $('#itemCount').textContent = items.length;
-  $('#categoryCount').textContent = categories.length;
+  updateHeroStats_(categories.length);
   $('#categories').innerHTML = `<button class="chip${activeCategory ? '' : ' active'}" data-cat="" title="全部器材"><span class="category-icon category-all-icon" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span><span>全部</span></button>` + categories.map(category => {
     const sample = items.find(item => item.category === category);
     const visual = sample ? categoryPreviewMarkup_(sample) : `<span class="category-icon" aria-hidden="true">${categoryIcon_(category)}</span>`;
     return `<button class="chip${category === activeCategory ? ' active' : ''}" data-cat="${esc(category)}" title="${esc(categoryName(category))}">${visual}<span>${esc(categoryName(category))}</span></button>`;
   }).join('');
+  requestAnimationFrame(updateCategoryArrows_);
   $('#categories').onclick = event => {
     const button = event.target.closest('button');
     if (!button) return;
@@ -357,7 +400,7 @@ function addToCart(item, quantity) {
   if (quantity > item.available) return toast(`${displayItemName_(item)} 目前最多可借 ${item.available} 件。`);
   cart.set(item.code, { ...item, quantity });
   updateCart();
-  toast(`已加入：${displayItemName_(item)}`);
+  showAddedFeedback_(item);
 }
 
 function updateCart() {
@@ -885,7 +928,30 @@ async function searchManager() {
   }
 }
 
-function toast(message) { const element = $('#toast'); element.textContent = message; element.hidden = false; clearTimeout(window.toastTimer); window.toastTimer = setTimeout(() => element.hidden = true, 5000); }
+function toast(message) { const element = $('#toast'); element.classList.remove('added-feedback'); element.textContent = message; element.hidden = false; clearTimeout(window.toastTimer); window.toastTimer = setTimeout(() => element.hidden = true, 5000); }
+
+function showAddedFeedback_(item) {
+  const element = $('#toast');
+  clearTimeout(window.toastTimer);
+  element.replaceChildren();
+  element.classList.add('added-feedback');
+  const title = document.createElement('strong');
+  title.className = 'added-feedback-title';
+  for (const [index, character] of [...'已加入借用'].entries()) {
+    const letter = document.createElement('span');
+    letter.textContent = character;
+    letter.style.setProperty('--letter-delay', `${index * 65}ms`);
+    title.append(letter);
+  }
+  const detail = document.createElement('span');
+  detail.className = 'added-feedback-detail';
+  detail.textContent = displayItemName_(item);
+  element.append(title, detail);
+  element.style.removeProperty('--added-feedback-width');
+  element.hidden = false;
+  element.style.setProperty('--added-feedback-width', `${element.offsetWidth * 1.1}px`);
+  window.toastTimer = setTimeout(() => { element.hidden = true; element.classList.remove('added-feedback'); }, 2500);
+}
 
 let searchRenderTimer_;
 $('#search').oninput = event => {
@@ -902,9 +968,37 @@ document.addEventListener('change', event => {
   requestAnimationFrame(() => select.classList.add('is-selected'));
   window.setTimeout(() => select.classList.remove('is-selected'), 240);
 });
-$('.close').onclick = () => $('#dialog').close();
-$('#dialog').onclick = event => { if (event.target === $('#dialog')) $('#dialog').close(); };
-document.querySelectorAll('[data-close]').forEach(button => button.onclick = () => $(`#${button.dataset.close}`).close());
+const closingDialogs_ = new WeakMap();
+function closeDialogAnimated_(dialog) {
+  if (closingDialogs_.has(dialog)) return closingDialogs_.get(dialog);
+  if (!dialog.open) return Promise.resolve();
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    dialog.close();
+    return Promise.resolve();
+  }
+  dialog.classList.add('is-closing');
+  const animation = dialog.animate([
+    {opacity:1, transform:'scale(1)'},
+    {opacity:0, transform:'scale(.96)'}
+  ], {duration:240, easing:'cubic-bezier(.4,0,.6,1)', fill:'forwards'});
+  const finished = animation.finished.catch(() => {}).then(() => {
+    dialog.close();
+    animation.cancel();
+    dialog.classList.remove('is-closing');
+    closingDialogs_.delete(dialog);
+  });
+  closingDialogs_.set(dialog, finished);
+  return finished;
+}
+document.querySelectorAll('dialog').forEach(dialog => {
+  dialog.addEventListener('cancel', event => {
+    event.preventDefault();
+    closeDialogAnimated_(dialog);
+  });
+});
+$('.close').onclick = () => closeDialogAnimated_($('#dialog'));
+$('#dialog').onclick = event => { if (event.target === $('#dialog')) closeDialogAnimated_($('#dialog')); };
+document.querySelectorAll('[data-close]').forEach(button => button.onclick = () => closeDialogAnimated_($(`#${button.dataset.close}`)));
 $('#cartButton').onclick = openCheckout;
 $('#returnButton').onclick = () => openReturn();
 $('#lookupButton').onclick = lookupReturn;
@@ -925,10 +1019,10 @@ $('#designReset').onclick = () => {
   toast('已恢復 DayPay 參考預設。');
 };
 $('#designExport').onclick = exportDesign_;
-$('#managerResults').onclick = event => {
+$('#managerResults').onclick = async event => {
   const button = event.target.closest('[data-managed-return]');
   if (!button) return;
-  $('#manageDialog').close();
+  await closeDialogAnimated_($('#manageDialog'));
   openReturn(button.dataset.managedReturn, managerAdminKey_);
 };
 
@@ -937,9 +1031,23 @@ document.addEventListener('click', event => {
   if (clearButton) clearSignature_(clearButton.dataset.clearSignature);
 });
 
+function updateCategoryArrows_() {
+  const strip = $('#categories');
+  $('#categoryPrevious').disabled = strip.scrollLeft <= 2;
+  $('#categoryNext').disabled = strip.scrollLeft + strip.clientWidth >= strip.scrollWidth - 2;
+}
+for (const [id, direction] of [['categoryPrevious', -1], ['categoryNext', 1]]) {
+  $('#' + id).onclick = () => {
+    const strip = $('#categories');
+    strip.scrollBy({left: direction * Math.max(160, strip.clientWidth * .75), behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'});
+  };
+}
+$('#categories').addEventListener('scroll', updateCategoryArrows_, {passive:true});
+new ResizeObserver(updateCategoryArrows_).observe($('#categories'));
+
 let lastScrollPosition_ = window.scrollY;
 window.addEventListener('scroll', () => {
-  const categories = $('#categories');
+  const categories = $('#categoryCarousel');
   const currentPosition = window.scrollY;
   if (Math.abs(currentPosition - lastScrollPosition_) < 8) return;
   // 分類列尚未吸附到頂端時不可提前向上位移，否則手機會蓋住搜尋控制區。
@@ -1000,7 +1108,7 @@ $('#checkoutForm').onsubmit = async event => {
     const result = await post({ action: 'request', borrower: { name: form.get('name').trim(), studentId: form.get('studentId').trim(), phone: form.get('phone').trim(), email: form.get('email').trim() }, loan: { start: form.get('loanStart'), expectedReturn: form.get('expectedReturn') }, items: requestItems, signature });
     result.timings = { ...result.timings, prepareMs, submitTotalMs: Math.round(performance.now() - submitStartedAt) };
     const email = form.get('email').trim();
-    cart.clear(); updateCart(); $('#checkoutDialog').close(); formElement.reset(); clearSignature_('checkout'); showSuccess(result, email, selectedItems);
+    cart.clear(); updateCart(); await closeDialogAnimated_($('#checkoutDialog')); formElement.reset(); clearSignature_('checkout'); showSuccess(result, email, selectedItems);
   } catch (error) { resetTurnstile_('checkoutSecurity'); toast(error.message); }
   finally { $('#checkoutProgress').hidden = true; submit.disabled = false; submit.textContent = '送出借用申請'; }
 };
@@ -1028,7 +1136,7 @@ $('#returnForm').onsubmit = async event => {
     const prepareMs = Math.round(performance.now() - submitStartedAt);
     const result = await post({ action: 'return', requestId: form.get('requestId'), returnCode: form.get('returnCode'), adminKey: form.get('adminKey'), items: returnItems, signature });
     result.timings = { ...result.timings, prepareMs, submitTotalMs: Math.round(performance.now() - submitStartedAt) };
-    $('#returnDialog').close(); formElement.reset(); clearSignature_('return');
+    await closeDialogAnimated_($('#returnDialog')); formElement.reset(); clearSignature_('return');
     setSuccessHeading_(true);
     $('#successContent').innerHTML = `<p class="note">${esc(result.message || '已完成歸還登記。')}</p>${uploadTimingHtml_(result.timings)}`;
     $('#successDialog').showModal();
