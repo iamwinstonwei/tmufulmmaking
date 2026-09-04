@@ -17,6 +17,12 @@
 
 不要把 `apps-script/Code.gs`、Google Drive 資料夾或試算表的編輯連結放到公開網站。公開網站只需要 `index.html` 與 `app.js`。
 
+## Cloudflare 私有後端（建議）
+
+若你要保留「任何人可申請、但借用者不用密碼」的流程，已附上 [`cloudflare-worker/README.md`](cloudflare-worker/README.md)。零預算版改用 Cloudflare Turnstile 防機器人、D1 儲存私密借還資料，照片則保留在受限制的 Google Drive；只有管理者需要管理密碼。
+
+Cloudflare 資源與秘密尚未由此專案自動建立；完成該說明的部署與 `cloudflare-config.js` 設定前，網站仍會使用目前的 GAS 後端。
+
 ## 管理者查看庫存與借用紀錄
 
 請以試算表擁有者或編輯者帳號開啟原本的 Google 試算表：
