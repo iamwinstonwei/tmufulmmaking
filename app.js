@@ -390,9 +390,13 @@ function playSelection_(element, className = 'is-selected') {
 function openDetail(item) {
   $('#dCategory').textContent = categoryName(item.category);
   $('#dName').textContent = displayItemName_(item);
+  $('#detailPhoto').innerHTML = cutoutMarkup_(item);
+  const detailImage = $('#detailPhoto img');
+  if (detailImage) { detailImage.loading = 'eager'; detailImage.fetchPriority = 'high'; }
   const fields = [['所有者', displayOwner_(item)], ['財產編號', item.codes.join('、')], ['可借數量', item.available], ['檢查配件／備註', item.note], ['用途', item.purpose], ['出班收納位置', item.dispatch], ['庫藏位置', item.storage]].filter(field => field[1] !== '' && field[1] !== undefined);
   $('#detailList').innerHTML = fields.map(([label, value]) => `<div class="detail"><label>${label}</label><div>${esc(value)}</div></div>`).join('');
   $('#dialog').showModal();
+  $('#dialog .modal-scroll').scrollTop = 0;
 }
 
 function addToCart(item, quantity) {
