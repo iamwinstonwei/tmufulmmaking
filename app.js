@@ -832,11 +832,32 @@ function openManager() {
   keepModalAtTop_('manageDialog');
 }
 
+function uploadTimingHtml_(timings) {
+  if (!timings) return '';
+  const seconds = value => Number.isFinite(value) && value >= 0 ? `${(value / 1000).toFixed(1)} 秒` : '未記錄';
+  const rows = [
+    ['送出後照片準備', timings.prepareMs],
+    ['驗證與建立上傳作業', timings.startMs],
+    ['照片與簽名上傳／儲存', timings.uploadMs],
+    ['完成登記', timings.finalizeMs],
+    ['送出至完成總耗時', timings.submitTotalMs ?? timings.totalMs]
+  ];
+  return `<section class="manager-result" aria-label="本次處理耗時"><h3>本次處理耗時</h3>
+    ${rows.map(([label, value]) => `<p style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap"><span>${label}</span><b>${seconds(value)}</b></p>`).join('')}
+    <p class="note">時間包含網路等待。上傳／儲存含 Cloudflare、Apps Script 與 Drive，不代表純 Drive 寫檔時間。此區不含個資，可單獨截圖。</p></section>`;
+}
+
+function setSuccessHeading_(isReturn) {
+  $('#successDialog .modal-head h2').textContent = isReturn ? '已完成歸還登記' : '已完成申請';
+  $('#successDialog .modal-head .tag').textContent = isReturn ? '歸還完成' : '申請完成';
+}
+
 function showSuccess(result, borrowerEmail, requestedItems) {
+  setSuccessHeading_(false);
   const emailNote = result.emailSent ? `確認信已寄到 <b>${esc(borrowerEmail)}</b>。` : result.emailQueued ? `申請已儲存，確認信正在背景寄送至 <b>${esc(borrowerEmail)}</b>；請先記下以下資料。` : '申請已儲存，但確認信寄送失敗；請立即記下以下資料。';
   $('#successContent').innerHTML = `<p class="note">申請資料已完成儲存，${emailNote}</p>
     <div class="manager-result"><h3>借用編號：${esc(result.requestId)}</h3><p><b>歸還驗證碼：${esc(result.returnCode)}</b></p><p>歸還時須同時輸入借用編號與驗證碼，請勿分享給他人。</p>
-    <p>${requestedItems.map(item => `${esc(displayItemName_(item))} × ${item.quantity}`).join('、')}</p></div>`;
+    <p>${requestedItems.map(item => `${esc(displayItemName_(item))} × ${item.quantity}`).join('、')}</p></div>${uploadTimingHtml_(result.timings)}`;
   $('#successDialog').showModal();
 }
 
@@ -962,6 +983,7 @@ document.addEventListener('change', event => {
 
 $('#checkoutForm').onsubmit = async event => {
   event.preventDefault();
+  const submitStartedAt = performance.now();
   const formElement = event.currentTarget;
   if (!validateBorrower_(formElement)) return;
   let signature;
@@ -974,7 +996,9 @@ $('#checkoutForm').onsubmit = async event => {
     const form = new FormData(formElement);
     const selectedItems = [...cart.values()];
     const requestItems = await Promise.all(selectedItems.map(async item => ({ ...item, checkOutPhotos: await Promise.all([...document.querySelectorAll(`[data-checkout-photo="${CSS.escape(item.code)}"]`)].map(input => fileAsDataUrl(input, 'checkout'))) })));
+    const prepareMs = Math.round(performance.now() - submitStartedAt);
     const result = await post({ action: 'request', borrower: { name: form.get('name').trim(), studentId: form.get('studentId').trim(), phone: form.get('phone').trim(), email: form.get('email').trim() }, loan: { start: form.get('loanStart'), expectedReturn: form.get('expectedReturn') }, items: requestItems, signature });
+    result.timings = { ...result.timings, prepareMs, submitTotalMs: Math.round(performance.now() - submitStartedAt) };
     const email = form.get('email').trim();
     cart.clear(); updateCart(); $('#checkoutDialog').close(); formElement.reset(); clearSignature_('checkout'); showSuccess(result, email, selectedItems);
   } catch (error) { resetTurnstile_('checkoutSecurity'); toast(error.message); }
@@ -983,6 +1007,7 @@ $('#checkoutForm').onsubmit = async event => {
 
 $('#returnForm').onsubmit = async event => {
   event.preventDefault();
+  const submitStartedAt = performance.now();
   const formElement = event.currentTarget;
   if (!formElement.checkValidity()) return formElement.reportValidity();
   let signature;
@@ -1000,8 +1025,13 @@ $('#returnForm').onsubmit = async event => {
       photoInputs.get(code).push(input);
     });
     const returnItems = await Promise.all([...photoInputs].map(async ([code, inputs]) => ({ code, returnPhotos: await Promise.all(inputs.map(input => fileAsDataUrl(input, 'return'))) })));
+    const prepareMs = Math.round(performance.now() - submitStartedAt);
     const result = await post({ action: 'return', requestId: form.get('requestId'), returnCode: form.get('returnCode'), adminKey: form.get('adminKey'), items: returnItems, signature });
-    $('#returnDialog').close(); formElement.reset(); clearSignature_('return'); toast(result.message);
+    result.timings = { ...result.timings, prepareMs, submitTotalMs: Math.round(performance.now() - submitStartedAt) };
+    $('#returnDialog').close(); formElement.reset(); clearSignature_('return');
+    setSuccessHeading_(true);
+    $('#successContent').innerHTML = `<p class="note">${esc(result.message || '已完成歸還登記。')}</p>${uploadTimingHtml_(result.timings)}`;
+    $('#successDialog').showModal();
   } catch (error) { if (!formElement.elements.adminKey.value) resetTurnstile_('returnSecurity'); toast(error.message); }
   finally {
     $('#returnProgress').hidden = true;
