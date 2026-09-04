@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>北醫影片創作社｜器材借用目錄</title>
-  <link rel="preload" as="image" href="assets/tmu-glass-hero.png" fetchpriority="high">
+  <link rel="preload" as="image" href="assets/tmu-monochrome-hero.png" fetchpriority="high">
   <style>
     :root{--ink:#182235;--muted:#647085;--line:#e6e9ef;--paper:#f7f8fb;--blue:#165dff;--aqua:#dff6ef;--green:#0a7c62;--orange:#ffb44c;--shadow:0 12px 30px rgba(31,50,80,.08)}
     *{box-sizing:border-box} body{margin:0;background:var(--paper);color:var(--ink);font-family:'Noto Sans TC',system-ui,sans-serif}
@@ -199,6 +199,10 @@
     #dialog .detail div{overflow-wrap:anywhere;white-space:pre-wrap}
     #detailPhoto .product-visual>span{width:186px;height:186px}
     @media(max-width:620px){#dialog .modal{max-height:calc(100dvh - 20px)}#dName{font-size:18px}#detailPhoto .product-visual{height:270px}}
+    /* Monochrome artwork: preserve the curved lower outline on wide screens. */
+    .hero{background-color:#fff;background-image:linear-gradient(90deg,rgba(255,255,255,.97),rgba(255,255,255,.9) 40%,rgba(255,255,255,.35) 68%,rgba(255,255,255,.06)),url('assets/tmu-monochrome-hero.png');background-size:cover,cover;background-position:center,center 72%;background-repeat:no-repeat}
+    /* A narrower crop keeps the central curve visible behind a readable text area. */
+    @media(max-width:620px){.hero{background-image:linear-gradient(90deg,rgba(255,255,255,.94),rgba(255,255,255,.84) 60%,rgba(255,255,255,.55)),url('assets/tmu-monochrome-hero.png');background-size:cover,cover;background-position:center,58% 60%}}
   </style>
 </head>
 <body>
