@@ -1,8 +1,6 @@
-const LEGACY_API_URL = 'https://script.google.com/macros/s/AKfycbyUcZU0qOT-1wMUBvSy7iFepJGN4_3GZD87Ik7ilpzJFlThVydDteA0xFCUDf7FL4V53g/exec';
 const CLOUDFLARE = window.TMU_CLOUDFLARE || {};
 const CLOUDFLARE_API_URL = String(CLOUDFLARE.apiUrl || '').replace(/\/+$/, '');
 const USING_CLOUDFLARE = Boolean(CLOUDFLARE_API_URL && CLOUDFLARE.turnstileSiteKey);
-const API_URL = USING_CLOUDFLARE ? CLOUDFLARE_API_URL : LEGACY_API_URL;
 const INVENTORY_CACHE_KEY = 'tmu-equipment-inventory-v2';
 const INVENTORY_CACHE_MAX_AGE = 12 * 60 * 60 * 1000;
 
@@ -833,27 +831,16 @@ async function secureReturn_(data) {
 }
 
 async function post(data) {
-  if (USING_CLOUDFLARE) {
-    if (data.action === 'request') return secureRequest_(data);
-    if (data.action === 'lookup') return secureJson_('/api/return/lookup', { requestId: data.requestId, returnCode: data.returnCode }, data.adminKey);
-    if (data.action === 'return') return secureReturn_(data);
-    if (data.action === 'manageSearch') return secureJson_('/api/manage/search', { name: data.name }, data.adminKey);
-    throw new Error('不支援的資料操作。');
-  }
-  if (!API_URL) throw new Error('系統尚未連接資料庫。請先依 apps-script/README.md 部署後端，並把 Web App /exec 網址填入 app.js 的 API_URL。');
-  const response = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(data) });
-  const body = await response.text();
-  let result;
-  try { result = JSON.parse(body); } catch (error) {
-    if (data.action === 'manageSearch') throw new Error('管理功能的後端尚未更新。請依 apps-script/README.md 貼上新版 Code.gs、設定 ADMIN_KEY，並重新部署。');
-    throw new Error('系統回應格式錯誤，請確認 Apps Script 已重新部署。');
-  }
-  if (!result.ok) throw new Error(result.message || '送出失敗。');
-  return result;
+  if (!USING_CLOUDFLARE) throw new Error('系統尚未連接安全後端，請檢查 cloudflare-config.js。');
+  if (data.action === 'request') return secureRequest_(data);
+  if (data.action === 'lookup') return secureJson_('/api/return/lookup', { requestId: data.requestId, returnCode: data.returnCode }, data.adminKey);
+  if (data.action === 'return') return secureReturn_(data);
+  if (data.action === 'manageSearch') return secureJson_('/api/manage/search', { name: data.name }, data.adminKey);
+  throw new Error('不支援的資料操作。');
 }
 
 async function lookupReturn() {
-  if (!API_URL) return toast('請先完成 Apps Script 後端部署。');
+  if (!USING_CLOUDFLARE) return toast('安全後端尚未設定完成。');
   const form = new FormData($('#returnForm'));
   const requestId = String(form.get('requestId') || '').trim();
   const returnCode = String(form.get('returnCode') || '').trim();
